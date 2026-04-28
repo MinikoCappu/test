@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual env
+venv/
+env/
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Windows ADS
+*:Zone.Identifier
+
+# IDE
+.vscode/
+.idea/
+
+# Data (если большой датасет)
+data/
+faces/
