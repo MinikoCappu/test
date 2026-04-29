@@ -212,23 +212,33 @@ def detect_face(net, frame):
     detections = net.forward()
 
     best_face = None
+    best_area = 0
     best_conf = 0.0
 
     for i in range(detections.shape[2]):
         conf = float(detections[0, 0, i, 2])
 
-        if conf > CONF_THRESHOLD and conf > best_conf:
-            box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
-            x1, y1, x2, y2 = box.astype(int)
+        if conf < CONF_THRESHOLD:
+            continue
 
-            x1 = max(0, x1)
-            y1 = max(0, y1)
-            x2 = min(w, x2)
-            y2 = min(h, y2)
+        box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
+        x1, y1, x2, y2 = box.astype(int)
 
-            if x2 > x1 and y2 > y1:
-                best_face = (x1, y1, x2, y2)
-                best_conf = conf
+        x1 = max(0, x1)
+        y1 = max(0, y1)
+        x2 = min(w, x2)
+        y2 = min(h, y2)
+
+        if x2 <= x1 or y2 <= y1:
+            continue
+
+        area = (x2 - x1) * (y2 - y1)
+
+        # 🔥 КЛЮЧЕВОЕ ИЗМЕНЕНИЕ:
+        if area > best_area:
+            best_area = area
+            best_face = (x1, y1, x2, y2)
+            best_conf = conf
 
     return best_face, best_conf
 

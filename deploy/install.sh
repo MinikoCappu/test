@@ -33,8 +33,9 @@ else
 fi
 
 echo "Поиск RKNN .whl..."
-WHL_FILE=$(find / -type f -name "rknn_toolkit_lite2-2.3.2-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl" 2>/dev/null | head -n 1)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+WHL_FILE="$SCRIPT_DIR/rknn_toolkit_lite2-2.3.2-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl"
 if [ -n "$WHL_FILE" ]; then
   echo "Найден: $WHL_FILE"
   pip3 install "$WHL_FILE"
