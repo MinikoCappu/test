@@ -86,3 +86,47 @@ done
 echo "========================================"
 echo "УСТАНОВКА ЗАВЕРШЕНА"
 echo "========================================"
+
+echo "Настройка автозапуска..."
+
+SERVICE_NAME="vit_coatnet"
+SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
+
+SCRIPT_PATH=$(find / -type f -name "vit_coatnet_hybrid.py" 2>/dev/null | head -n 1)
+
+if [ -z "$SCRIPT_PATH" ]; then
+  echo "vit_coatnet_hybrid.py не найден"
+  exit 1
+fi
+
+echo "Найден скрипт: $SCRIPT_PATH"
+
+PYTHON_PATH=$(which python3)
+
+cat > "$SERVICE_FILE" <<EOF
+[Unit]
+Description=ViT + CoAtNet Drowsiness Detection
+After=network.target
+
+[Service]
+ExecStart=$PYTHON_PATH $SCRIPT_PATH
+Restart=always
+User=root
+WorkingDirectory=$(dirname "$SCRIPT_PATH")
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+echo "Перезагрузка systemd..."
+systemctl daemon-reexec
+systemctl daemon-reload
+
+echo "Включение автозапуска..."
+systemctl enable $SERVICE_NAME
+
+echo "Запуск сервиса..."
+systemctl start $SERVICE_NAME
+
+echo "Проверка статуса..."
+systemctl status $SERVICE_NAME --no-pager
