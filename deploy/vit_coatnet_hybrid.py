@@ -5,6 +5,7 @@ import threading
 import queue
 import sys
 
+
 CAMERA_INDEX = 0
 
 VIT_RKNN_PATH = "vit_quant.rknn"
@@ -20,7 +21,8 @@ DROWSY_THRESHOLD = 0.5
 MIN_EVENT_SEC = 3.63
 
 QUEUE_MAXSIZE = 2
-DEBUG_MODE = True
+
+DEBUG_MODE = False
 USE_FLOAT_NORMALIZATION = False
 
 
@@ -35,17 +37,20 @@ def validate_face_detector():
 
     if model_size < 5_000_000:
         raise ValueError(
-            f"Файл {FACE_MODEL} слишком маленький: {model_size:,} bytes"
+            f"Файл {FACE_MODEL} слишком маленький: {model_size:,} bytes. "
+            f"Скорее всего, модель повреждена."
         )
 
 
 def load_face_detector():
     validate_face_detector()
 
+    print("[INIT] loading_face_detector", flush=True)
+
     net = cv2.dnn.readNetFromCaffe(FACE_PROTO, FACE_MODEL)
 
     if net.empty():
-        raise RuntimeError("OpenCV не смог загрузить face detector")
+        raise RuntimeError("OpenCV не смог загрузить Caffe face detector")
 
     dummy_frame = np.zeros((300, 300, 3), dtype=np.uint8)
 
@@ -63,10 +68,12 @@ def load_face_detector():
     try:
         _ = net.forward()
     except Exception as e:
-        raise RuntimeError(f"Ошибка face detector: {e}") from e
+        raise RuntimeError(f"Face detector не прошёл dummy inference: {e}") from e
 
     net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
     net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
+
+    print("[INIT] face_detector_ready", flush=True)
 
     return net
 
@@ -76,7 +83,7 @@ class RKNNClassifier:
         try:
             from rknnlite.api import RKNNLite
         except ImportError:
-            print("rknn-lite-runtime не установлен")
+            print("[ERROR] rknn_lite_runtime_not_installed", flush=True)
             sys.exit(1)
 
         if not os.path.exists(model_path):
@@ -85,13 +92,21 @@ class RKNNClassifier:
         self.name = name
         self.rknn = RKNNLite()
 
+        print(f"[INIT] loading_model name={self.name} path={model_path}", flush=True)
+
         ret = self.rknn.load_rknn(model_path)
+
         if ret != 0:
             raise RuntimeError(f"Ошибка загрузки {self.name}, code={ret}")
 
+        print(f"[INIT] init_npu name={self.name}", flush=True)
+
         ret = self.rknn.init_runtime(core_mask=core_mask)
+
         if ret != 0:
             raise RuntimeError(f"Ошибка init_runtime для {self.name}, code={ret}")
+
+        print(f"[INIT] model_ready name={self.name}", flush=True)
 
     def preprocess(self, face_bgr):
         img = cv2.resize(face_bgr, (IMAGE_SIZE, IMAGE_SIZE))
@@ -104,6 +119,7 @@ class RKNNClassifier:
             std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
             img = (img - mean) / std
+
             input_data = np.expand_dims(img.transpose(2, 0, 1), axis=0)
             input_data = np.ascontiguousarray(input_data, dtype=np.float32)
         else:
@@ -117,10 +133,21 @@ class RKNNClassifier:
             return 0.0
 
         input_data = self.preprocess(face_bgr)
+
+        if debug:
+            print(
+                f"[DEBUG] model={self.name} "
+                f"input_shape={input_data.shape} "
+                f"dtype={input_data.dtype} "
+                f"min={input_data.min()} "
+                f"max={input_data.max()}",
+                flush=True
+            )
+
         outputs = self.rknn.inference(inputs=[input_data])
 
         if outputs is None or len(outputs) == 0:
-            raise RuntimeError(f"{self.name}: пустой output")
+            raise RuntimeError(f"{self.name}: пустой output от RKNN")
 
         out_tensor = outputs[0].copy()
         raw_value = float(out_tensor.flatten()[0])
@@ -129,6 +156,12 @@ class RKNNClassifier:
             prob = 1.0 / (1.0 + np.exp(-raw_value))
         else:
             prob = raw_value
+
+        if debug:
+            print(
+                f"[DEBUG] model={self.name} raw={raw_value:.4f} prob={prob:.4f}",
+                flush=True
+            )
 
         return float(prob)
 
@@ -154,6 +187,7 @@ def detect_face(net, frame):
 
     best_face = None
     best_area = 0
+    best_conf = 0.0
 
     for i in range(detections.shape[2]):
         conf = float(detections[0, 0, i, 2])
@@ -177,8 +211,9 @@ def detect_face(net, frame):
         if area > best_area:
             best_area = area
             best_face = (x1, y1, x2, y2)
+            best_conf = conf
 
-    return best_face
+    return best_face, best_conf
 
 
 class SmoothPredictor:
@@ -198,7 +233,11 @@ class SmoothPredictor:
             avg_prob = sum(self.history) / len(self.history)
             cls = 1 if avg_prob >= self.threshold else 0
 
-            return cls
+            return cls, avg_prob
+
+    def reset(self):
+        with self.lock:
+            self.history.clear()
 
 
 class EventTracker:
@@ -227,10 +266,18 @@ class EventTracker:
                 self.start_idx = None
 
     def _finalize(self, end_idx):
+        start_sec = self.start_idx / self.fps
+        end_sec = end_idx / self.fps
         duration_sec = (end_idx - self.start_idx + 1) / self.fps
 
         if duration_sec >= self.min_sec:
-            print(f"СОНЛИВОСТЬ ОБНАРУЖЕНА: длительность {duration_sec:.2f} сек")
+            print(
+                f"[DROWSY_EVENT] "
+                f"start={start_sec:.2f}s "
+                f"end={end_sec:.2f}s "
+                f"duration={duration_sec:.2f}s",
+                flush=True
+            )
 
 
 class CameraThread:
@@ -292,8 +339,35 @@ class ProcessingThread:
         self.error = None
         self.lock = threading.Lock()
 
+        self.prev_state = None
+
         self.thread = threading.Thread(target=self._run, daemon=True)
         self.thread.start()
+
+    def log_state(
+        self,
+        state,
+        prob=None,
+        vit_prob=None,
+        coat_prob=None,
+        face_conf=None
+    ):
+        if state == self.prev_state:
+            return
+
+        if prob is None:
+            print(f"[STATE] {state}", flush=True)
+        else:
+            print(
+                f"[STATE] {state} "
+                f"prob={prob:.3f} "
+                f"vit={vit_prob:.3f} "
+                f"coatnet={coat_prob:.3f} "
+                f"face_conf={face_conf:.3f}",
+                flush=True
+            )
+
+        self.prev_state = state
 
     def _run(self):
         try:
@@ -309,28 +383,76 @@ class ProcessingThread:
                 color = (255, 255, 255)
                 is_drowsy = False
 
-                box = detect_face(self.face_net, frame)
+                box, face_conf = detect_face(self.face_net, frame)
 
                 if box is not None:
                     x1, y1, x2, y2 = box
                     roi = frame[y1:y2, x1:x2]
 
-                    vit_prob = self.vit.predict(roi)
-                    coat_prob = self.coatnet.predict(roi)
+                    vit_prob = self.vit.predict(roi, debug=DEBUG_MODE)
+                    coat_prob = self.coatnet.predict(roi, debug=DEBUG_MODE)
 
                     prob = vit_prob * 0.8 + coat_prob * 0.2
 
-                    cls = self.smoother.add(prob)
+                    cls, smooth_prob = self.smoother.add(prob)
 
                     if cls == 1:
                         is_drowsy = True
-                        status = "DROWSY!"
+                        status = "DROWSY"
                         color = (0, 0, 255)
+                        self.log_state(
+                            state="DROWSY",
+                            prob=smooth_prob,
+                            vit_prob=vit_prob,
+                            coat_prob=coat_prob,
+                            face_conf=face_conf
+                        )
                     else:
                         status = "AWAKE"
                         color = (0, 255, 0)
+                        self.log_state(
+                            state="AWAKE",
+                            prob=smooth_prob,
+                            vit_prob=vit_prob,
+                            coat_prob=coat_prob,
+                            face_conf=face_conf
+                        )
 
                     cv2.rectangle(draw, (x1, y1), (x2, y2), color, 2)
+
+                    cv2.putText(
+                        draw,
+                        f"face={face_conf:.2f}",
+                        (x1, max(20, y1 - 45)),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.5,
+                        color,
+                        1
+                    )
+
+                    cv2.putText(
+                        draw,
+                        f"vit={vit_prob:.2f} coat={coat_prob:.2f}",
+                        (x1, max(20, y1 - 28)),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.5,
+                        color,
+                        1
+                    )
+
+                    cv2.putText(
+                        draw,
+                        f"ens={prob:.2f} smooth={smooth_prob:.2f}",
+                        (x1, max(20, y1 - 10)),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.5,
+                        color,
+                        1
+                    )
+
+                else:
+                    self.smoother.reset()
+                    self.log_state("NO_FACE")
 
                 self.tracker.update(is_drowsy)
 
@@ -349,7 +471,7 @@ class ProcessingThread:
 
         except Exception as e:
             self.error = e
-            print(f"Processing error: {e}")
+            print(f"[ERROR] processing_error={e}", flush=True)
 
     def get_frame(self):
         with self.lock:
@@ -363,6 +485,8 @@ class ProcessingThread:
 
 
 def main():
+    print("[INIT] starting_vit_coatnet_hybrid", flush=True)
+
     vit_model = None
     coatnet_model = None
     face_net = None
@@ -371,13 +495,23 @@ def main():
     tracker = None
 
     try:
-        vit_model = RKNNClassifier(VIT_RKNN_PATH, name="ViT", core_mask=1)
-        coatnet_model = RKNNClassifier(COATNET_RKNN_PATH, name="CoAtNet", core_mask=1)
+        vit_model = RKNNClassifier(
+            VIT_RKNN_PATH,
+            name="ViT",
+            core_mask=1
+        )
+
+        coatnet_model = RKNNClassifier(
+            COATNET_RKNN_PATH,
+            name="CoAtNet",
+            core_mask=1
+        )
+
         face_net = load_face_detector()
         cam = CameraThread(CAMERA_INDEX)
 
     except Exception as e:
-        print(f"INITIALIZATION FAILED: {e}")
+        print(f"[ERROR] initialization_failed={e}", flush=True)
         sys.exit(1)
 
     fps = cam.cap.get(cv2.CAP_PROP_FPS)
@@ -385,9 +519,17 @@ def main():
     if fps is None or fps <= 1:
         fps = 30.0
 
-    smoother = SmoothPredictor(window=5, threshold=DROWSY_THRESHOLD)
+    print(f"[INIT] camera_fps={fps:.2f}", flush=True)
 
-    tracker = EventTracker(fps=fps, min_sec=MIN_EVENT_SEC)
+    smoother = SmoothPredictor(
+        window=5,
+        threshold=DROWSY_THRESHOLD
+    )
+
+    tracker = EventTracker(
+        fps=fps,
+        min_sec=MIN_EVENT_SEC
+    )
 
     proc = ProcessingThread(
         cam=cam,
@@ -398,10 +540,12 @@ def main():
         tracker=tracker
     )
 
+    print("[INIT] pipeline_started", flush=True)
+
     try:
         while True:
             if proc.has_error():
-                print(f"Pipeline halted: {proc.error}")
+                print(f"[ERROR] pipeline_halted={proc.error}", flush=True)
                 break
 
             frame = proc.get_frame()
@@ -413,9 +557,11 @@ def main():
                 break
 
     except KeyboardInterrupt:
-        pass
+        print("[INFO] stopped_by_user", flush=True)
 
     finally:
+        print("[INFO] shutting_down", flush=True)
+
         if proc:
             proc.close()
 
@@ -432,6 +578,8 @@ def main():
             coatnet_model.release()
 
         cv2.destroyAllWindows()
+
+        print("[INFO] done", flush=True)
 
 
 if __name__ == "__main__":
