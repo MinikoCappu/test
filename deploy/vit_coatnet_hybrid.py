@@ -36,6 +36,7 @@ VIDEO_DIR = os.path.join(BASE_DIR, "drowsy_videos")
 
 VIDEO_CODEC = "MJPG"
 VIDEO_EXT = ".avi"
+VIDEO_FPS = 12.0
 
 SHOW_WINDOW = os.environ.get("SHOW_WINDOW", "0") == "1"
 
@@ -310,41 +311,30 @@ class LocalEventDB:
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-
                     event_uid TEXT UNIQUE NOT NULL,
-
                     start_time_local TEXT NOT NULL,
                     confirmed_time_local TEXT,
                     end_time_local TEXT NOT NULL,
-
                     duration_sec REAL NOT NULL,
                     confirmation_sec REAL NOT NULL,
-
                     frame_count INTEGER NOT NULL,
                     fps REAL NOT NULL,
-
                     video_path TEXT NOT NULL,
-
                     avg_prob REAL,
                     max_prob REAL,
                     min_prob REAL,
-
                     avg_smooth_prob REAL,
                     max_smooth_prob REAL,
                     min_smooth_prob REAL,
-
                     avg_vit_prob REAL,
                     max_vit_prob REAL,
                     min_vit_prob REAL,
-
                     avg_coatnet_prob REAL,
                     max_coatnet_prob REAL,
                     min_coatnet_prob REAL,
-
                     avg_face_conf REAL,
                     max_face_conf REAL,
                     min_face_conf REAL,
-
                     created_at TEXT NOT NULL
                 )
             """)
@@ -352,25 +342,17 @@ class LocalEventDB:
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS frame_predictions (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-
                     event_uid TEXT NOT NULL,
-
                     local_timestamp TEXT NOT NULL,
                     elapsed_sec REAL NOT NULL,
-
                     frame_index INTEGER NOT NULL,
-
                     status TEXT NOT NULL,
-
                     prob REAL,
                     smooth_prob REAL,
-
                     vit_prob REAL,
                     coatnet_prob REAL,
                     face_conf REAL,
-
                     is_drowsy INTEGER NOT NULL,
-
                     FOREIGN KEY(event_uid) REFERENCES events(event_uid)
                 )
             """)
@@ -385,77 +367,57 @@ class LocalEventDB:
                 cur.execute("""
                     INSERT INTO events (
                         event_uid,
-
                         start_time_local,
                         confirmed_time_local,
                         end_time_local,
-
                         duration_sec,
                         confirmation_sec,
-
                         frame_count,
                         fps,
-
                         video_path,
-
                         avg_prob,
                         max_prob,
                         min_prob,
-
                         avg_smooth_prob,
                         max_smooth_prob,
                         min_smooth_prob,
-
                         avg_vit_prob,
                         max_vit_prob,
                         min_vit_prob,
-
                         avg_coatnet_prob,
                         max_coatnet_prob,
                         min_coatnet_prob,
-
                         avg_face_conf,
                         max_face_conf,
                         min_face_conf,
-
                         created_at
                     )
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     event_data["event_uid"],
-
                     event_data["start_time_local"],
                     event_data["confirmed_time_local"],
                     event_data["end_time_local"],
-
                     event_data["duration_sec"],
                     event_data["confirmation_sec"],
-
                     event_data["frame_count"],
                     event_data["fps"],
-
                     event_data["video_path"],
-
                     event_data["avg_prob"],
                     event_data["max_prob"],
                     event_data["min_prob"],
-
                     event_data["avg_smooth_prob"],
                     event_data["max_smooth_prob"],
                     event_data["min_smooth_prob"],
-
                     event_data["avg_vit_prob"],
                     event_data["max_vit_prob"],
                     event_data["min_vit_prob"],
-
                     event_data["avg_coatnet_prob"],
                     event_data["max_coatnet_prob"],
                     event_data["min_coatnet_prob"],
-
                     event_data["avg_face_conf"],
                     event_data["max_face_conf"],
                     event_data["min_face_conf"],
-
                     event_data["created_at"]
                 ))
 
@@ -464,17 +426,13 @@ class LocalEventDB:
                         event_uid,
                         local_timestamp,
                         elapsed_sec,
-
                         frame_index,
                         status,
-
                         prob,
                         smooth_prob,
-
                         vit_prob,
                         coatnet_prob,
                         face_conf,
-
                         is_drowsy
                     )
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -483,17 +441,13 @@ class LocalEventDB:
                         p["event_uid"],
                         p["local_timestamp"],
                         p["elapsed_sec"],
-
                         p["frame_index"],
                         p["status"],
-
                         p["prob"],
                         p["smooth_prob"],
-
                         p["vit_prob"],
                         p["coatnet_prob"],
                         p["face_conf"],
-
                         p["is_drowsy"]
                     )
                     for p in frame_predictions
@@ -518,7 +472,7 @@ class ContinuousDrowsyEventRecorder:
         video_dir=VIDEO_DIR
     ):
         self.db = db
-        self.fps = fps if fps and fps > 1 else 30.0
+        self.fps = fps if fps and fps > 1 else VIDEO_FPS
         self.min_confirm_sec = float(min_confirm_sec)
         self.video_dir = video_dir
 
@@ -598,26 +552,17 @@ class ContinuousDrowsyEventRecorder:
         h, w = frame.shape[:2]
 
         if w <= 0 or h <= 0:
-            print(
-                f"[ERROR] invalid_frame_size w={w} h={h}",
-                flush=True
-            )
+            print(f"[ERROR] invalid_frame_size w={w} h={h}", flush=True)
             self._reset()
             return False
 
         if not os.path.isdir(self.video_dir):
-            print(
-                f"[ERROR] video_dir_not_exists path={self.video_dir}",
-                flush=True
-            )
+            print(f"[ERROR] video_dir_not_exists path={self.video_dir}", flush=True)
             self._reset()
             return False
 
         if not os.access(self.video_dir, os.W_OK):
-            print(
-                f"[ERROR] video_dir_not_writable path={self.video_dir}",
-                flush=True
-            )
+            print(f"[ERROR] video_dir_not_writable path={self.video_dir}", flush=True)
             self._reset()
             return False
 
@@ -726,17 +671,13 @@ class ContinuousDrowsyEventRecorder:
             "event_uid": self.event_uid,
             "local_timestamp": self._now_local(),
             "elapsed_sec": float(elapsed_sec),
-
             "frame_index": int(self.frame_count),
             "status": status,
-
             "prob": float(prob) if prob is not None else None,
             "smooth_prob": float(smooth_prob) if smooth_prob is not None else None,
-
             "vit_prob": float(vit_prob) if vit_prob is not None else None,
             "coatnet_prob": float(coatnet_prob) if coatnet_prob is not None else None,
             "face_conf": float(face_conf) if face_conf is not None else None,
-
             "is_drowsy": 1
         })
 
@@ -787,39 +728,29 @@ class ContinuousDrowsyEventRecorder:
 
         event_data = {
             "event_uid": self.event_uid,
-
             "start_time_local": self.start_time_local,
             "confirmed_time_local": self.confirmed_time_local,
             "end_time_local": self.end_time_local,
-
             "duration_sec": float(duration_sec),
             "confirmation_sec": float(self.min_confirm_sec),
-
             "frame_count": int(self.frame_count),
             "fps": float(self.fps),
-
             "video_path": self.video_path,
-
             "avg_prob": self._safe_avg(self.probs),
             "max_prob": self._safe_max(self.probs),
             "min_prob": self._safe_min(self.probs),
-
             "avg_smooth_prob": self._safe_avg(self.smooth_probs),
             "max_smooth_prob": self._safe_max(self.smooth_probs),
             "min_smooth_prob": self._safe_min(self.smooth_probs),
-
             "avg_vit_prob": self._safe_avg(self.vit_probs),
             "max_vit_prob": self._safe_max(self.vit_probs),
             "min_vit_prob": self._safe_min(self.vit_probs),
-
             "avg_coatnet_prob": self._safe_avg(self.coatnet_probs),
             "max_coatnet_prob": self._safe_max(self.coatnet_probs),
             "min_coatnet_prob": self._safe_min(self.coatnet_probs),
-
             "avg_face_conf": self._safe_avg(self.face_confs),
             "max_face_conf": self._safe_max(self.face_confs),
             "min_face_conf": self._safe_min(self.face_confs),
-
             "created_at": self._now_local()
         }
 
@@ -911,24 +842,17 @@ class ContinuousDrowsyEventRecorder:
     def _reset(self):
         self.active = False
         self.confirmed = False
-
         self.writer = None
-
         self.event_uid = None
         self.video_path = None
-
         self.start_time_perf = None
         self.confirmed_time_perf = None
         self.end_time_perf = None
-
         self.start_time_local = None
         self.confirmed_time_local = None
         self.end_time_local = None
-
         self.frame_count = 0
-
         self.frame_predictions = []
-
         self.probs = []
         self.smooth_probs = []
         self.vit_probs = []
@@ -944,6 +868,9 @@ class CameraThread:
         if not self.cap.isOpened():
             raise RuntimeError(f"Не удалось открыть камеру {idx}")
 
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        self.cap.set(cv2.CAP_PROP_FPS, 30)
         self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
         self.q = queue.Queue(maxsize=QUEUE_MAXSIZE)
@@ -1011,6 +938,9 @@ class CameraThread:
         time.sleep(0.5)
 
         self.cap = cv2.VideoCapture(self.idx)
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        self.cap.set(cv2.CAP_PROP_FPS, 30)
         self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
         if self.cap.isOpened():
@@ -1249,6 +1179,7 @@ def main():
     print(f"[INIT] video_dir={VIDEO_DIR}", flush=True)
     print(f"[INIT] video_codec={VIDEO_CODEC}", flush=True)
     print(f"[INIT] video_ext={VIDEO_EXT}", flush=True)
+    print(f"[INIT] video_fps={VIDEO_FPS:.2f}", flush=True)
     print(f"[INIT] show_window={SHOW_WINDOW}", flush=True)
 
     vit_model = None
@@ -1280,12 +1211,15 @@ def main():
         print(f"[ERROR] initialization_failed={e}", flush=True)
         sys.exit(1)
 
-    fps = cam.cap.get(cv2.CAP_PROP_FPS)
+    camera_fps = cam.cap.get(cv2.CAP_PROP_FPS)
 
-    if fps is None or fps <= 1:
-        fps = 30.0
+    if camera_fps is None or camera_fps <= 1:
+        camera_fps = 30.0
 
-    print(f"[INIT] camera_fps={fps:.2f}", flush=True)
+    record_fps = VIDEO_FPS
+
+    print(f"[INIT] camera_fps={camera_fps:.2f}", flush=True)
+    print(f"[INIT] record_fps={record_fps:.2f}", flush=True)
 
     smoother = SmoothPredictor(
         window=5,
@@ -1293,7 +1227,7 @@ def main():
     )
 
     tracker = EventTracker(
-        fps=fps,
+        fps=record_fps,
         min_sec=MIN_EVENT_SEC
     )
 
@@ -1301,7 +1235,7 @@ def main():
 
     event_recorder = ContinuousDrowsyEventRecorder(
         db=db,
-        fps=fps,
+        fps=record_fps,
         min_confirm_sec=MIN_EVENT_SEC,
         video_dir=VIDEO_DIR
     )
