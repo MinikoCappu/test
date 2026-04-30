@@ -856,13 +856,23 @@ class ContinuousDrowsyEventRecorder:
 
 class CameraThread:
     def __init__(self, idx=0):
+        self.idx = idx
         self.cap = cv2.VideoCapture(idx)
 
         if not self.cap.isOpened():
             raise RuntimeError(f"Не удалось открыть камеру {idx}")
 
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
         self.q = queue.Queue(maxsize=QUEUE_MAXSIZE)
         self.stop = False
+
+        self.frame_counter = 0
+        self.failed_reads = 0
+        self.last_log_time = time.perf_counter()
+        self.last_frame_time = time.perf_counter()
+
+        print(f"[CAMERA] opened index={idx}", flush=True)
 
         self.thread = threading.Thread(target=self._run, daemon=True)
         self.thread.start()
@@ -871,9 +881,37 @@ class CameraThread:
         while not self.stop:
             ret, frame = self.cap.read()
 
-            if not ret:
-                self.stop = True
-                break
+            if not ret or frame is None:
+                self.failed_reads += 1
+
+                print(
+                    f"[CAMERA] read_failed count={self.failed_reads}",
+                    flush=True
+                )
+
+                time.sleep(0.1)
+
+                # Пытаемся переоткрыть камеру, если долго нет кадров
+                if self.failed_reads % 30 == 0:
+                    print("[CAMERA] trying_reopen", flush=True)
+                    self._reopen_camera()
+
+                continue
+
+            self.failed_reads = 0
+            self.frame_counter += 1
+            self.last_frame_time = time.perf_counter()
+
+            now = time.perf_counter()
+
+            if now - self.last_log_time >= 5.0:
+                print(
+                    f"[CAMERA] active "
+                    f"frames={self.frame_counter} "
+                    f"queue_size={self.q.qsize()}",
+                    flush=True
+                )
+                self.last_log_time = now
 
             if self.q.full():
                 try:
@@ -883,12 +921,36 @@ class CameraThread:
 
             self.q.put((ret, frame))
 
+        print("[CAMERA] thread_stopped", flush=True)
+
+    def _reopen_camera(self):
+        try:
+            self.cap.release()
+        except Exception:
+            pass
+
+        time.sleep(0.5)
+
+        self.cap = cv2.VideoCapture(self.idx)
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
+        if self.cap.isOpened():
+            print("[CAMERA] reopened_successfully", flush=True)
+        else:
+            print("[CAMERA] reopen_failed", flush=True)
+
     def read(self):
         return self.q.get()
 
     def close(self):
         self.stop = True
+
+        if self.thread.is_alive():
+            self.thread.join(timeout=2.0)
+
         self.cap.release()
+
+        print("[CAMERA] released", flush=True)
 
 
 class ProcessingThread:
