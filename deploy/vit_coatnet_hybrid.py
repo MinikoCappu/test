@@ -29,9 +29,15 @@ QUEUE_MAXSIZE = 2
 DEBUG_MODE = False
 USE_FLOAT_NORMALIZATION = False
 
-DB_PATH = "drowsiness_events.db"
-VIDEO_DIR = "drowsy_videos"
-VIDEO_CODEC = "mp4v"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+DB_PATH = os.path.join(BASE_DIR, "drowsiness_events.db")
+VIDEO_DIR = os.path.join(BASE_DIR, "drowsy_videos")
+
+VIDEO_CODEC = "MJPG"
+VIDEO_EXT = ".avi"
+
+SHOW_WINDOW = os.environ.get("SHOW_WINDOW", "0") == "1"
 
 
 def validate_face_detector():
@@ -495,6 +501,13 @@ class LocalEventDB:
 
                 conn.commit()
 
+                print(
+                    f"[DB] inserted_event "
+                    f"uid={event_data['event_uid']} "
+                    f"frames={len(frame_predictions)}",
+                    flush=True
+                )
+
 
 class ContinuousDrowsyEventRecorder:
     def __init__(
@@ -547,7 +560,7 @@ class ContinuousDrowsyEventRecorder:
 
         return os.path.join(
             self.video_dir,
-            f"drowsy_{timestamp_for_file}_{self.event_uid[:8]}.mp4"
+            f"drowsy_{timestamp_for_file}_{self.event_uid[:8]}{VIDEO_EXT}"
         )
 
     def _start_candidate_event(self, frame):
@@ -575,9 +588,51 @@ class ContinuousDrowsyEventRecorder:
         self.coatnet_probs = []
         self.face_confs = []
 
+        os.makedirs(self.video_dir, exist_ok=True)
+
+        if frame is None or frame.size == 0:
+            print("[ERROR] empty_frame_for_video_writer", flush=True)
+            self._reset()
+            return False
+
         h, w = frame.shape[:2]
 
+        if w <= 0 or h <= 0:
+            print(
+                f"[ERROR] invalid_frame_size w={w} h={h}",
+                flush=True
+            )
+            self._reset()
+            return False
+
+        if not os.path.isdir(self.video_dir):
+            print(
+                f"[ERROR] video_dir_not_exists path={self.video_dir}",
+                flush=True
+            )
+            self._reset()
+            return False
+
+        if not os.access(self.video_dir, os.W_OK):
+            print(
+                f"[ERROR] video_dir_not_writable path={self.video_dir}",
+                flush=True
+            )
+            self._reset()
+            return False
+
         fourcc = cv2.VideoWriter_fourcc(*VIDEO_CODEC)
+
+        print(
+            f"[VIDEO] opening_writer "
+            f"path={self.video_path} "
+            f"codec={VIDEO_CODEC} "
+            f"fps={self.fps:.2f} "
+            f"size=({w},{h}) "
+            f"dir_exists={os.path.isdir(self.video_dir)} "
+            f"dir_writable={os.access(self.video_dir, os.W_OK)}",
+            flush=True
+        )
 
         self.writer = cv2.VideoWriter(
             self.video_path,
@@ -587,7 +642,18 @@ class ContinuousDrowsyEventRecorder:
         )
 
         if not self.writer.isOpened():
-            raise RuntimeError(f"Не удалось открыть VideoWriter: {self.video_path}")
+            print(
+                f"[ERROR] cannot_open_video_writer "
+                f"path={self.video_path} "
+                f"codec={VIDEO_CODEC} "
+                f"fps={self.fps:.2f} "
+                f"size=({w},{h})",
+                flush=True
+            )
+
+            self.writer = None
+            self._reset()
+            return False
 
         print(
             f"[EVENT] candidate_started "
@@ -595,6 +661,8 @@ class ContinuousDrowsyEventRecorder:
             f"video={self.video_path}",
             flush=True
         )
+
+        return True
 
     def update(
         self,
@@ -610,7 +678,10 @@ class ContinuousDrowsyEventRecorder:
         with self.lock:
             if is_drowsy:
                 if not self.active:
-                    self._start_candidate_event(frame)
+                    started = self._start_candidate_event(frame)
+
+                    if not started:
+                        return
 
                 self._write_drowsy_frame(
                     frame=frame,
@@ -712,6 +783,7 @@ class ContinuousDrowsyEventRecorder:
             self.writer = None
 
         duration_sec = self.end_time_perf - self.start_time_perf
+        video_duration_sec = self.frame_count / self.fps if self.fps > 0 else 0.0
 
         event_data = {
             "event_uid": self.event_uid,
@@ -751,13 +823,23 @@ class ContinuousDrowsyEventRecorder:
             "created_at": self._now_local()
         }
 
+        print(
+            f"[DB] saving_event "
+            f"uid={self.event_uid} "
+            f"frames={len(self.frame_predictions)} "
+            f"video={self.video_path}",
+            flush=True
+        )
+
         self.db.save_event(event_data, self.frame_predictions)
 
         print(
             f"[EVENT] saved "
             f"uid={self.event_uid} "
-            f"duration={duration_sec:.2f}s "
+            f"event_duration={duration_sec:.2f}s "
+            f"video_duration={video_duration_sec:.2f}s "
             f"frames={self.frame_count} "
+            f"fps={self.fps:.2f} "
             f"video={self.video_path}",
             flush=True
         )
@@ -870,7 +952,6 @@ class CameraThread:
         self.frame_counter = 0
         self.failed_reads = 0
         self.last_log_time = time.perf_counter()
-        self.last_frame_time = time.perf_counter()
 
         print(f"[CAMERA] opened index={idx}", flush=True)
 
@@ -891,7 +972,6 @@ class CameraThread:
 
                 time.sleep(0.1)
 
-                # Пытаемся переоткрыть камеру, если долго нет кадров
                 if self.failed_reads % 30 == 0:
                     print("[CAMERA] trying_reopen", flush=True)
                     self._reopen_camera()
@@ -900,7 +980,6 @@ class CameraThread:
 
             self.failed_reads = 0
             self.frame_counter += 1
-            self.last_frame_time = time.perf_counter()
 
             now = time.perf_counter()
 
@@ -979,6 +1058,9 @@ class ProcessingThread:
 
         self.prev_state = None
 
+        self.processed_frames = 0
+        self.last_processing_log_time = time.perf_counter()
+
         self.thread = threading.Thread(target=self._run, daemon=True)
         self.thread.start()
 
@@ -1014,6 +1096,18 @@ class ProcessingThread:
 
                 if not ret:
                     break
+
+                self.processed_frames += 1
+
+                now = time.perf_counter()
+
+                if now - self.last_processing_log_time >= 5.0:
+                    print(
+                        f"[PROCESS] active "
+                        f"frames={self.processed_frames}",
+                        flush=True
+                    )
+                    self.last_processing_log_time = now
 
                 draw = frame.copy()
 
@@ -1150,6 +1244,12 @@ class ProcessingThread:
 
 def main():
     print("[INIT] starting_vit_coatnet_hybrid", flush=True)
+    print(f"[INIT] base_dir={BASE_DIR}", flush=True)
+    print(f"[INIT] db_path={DB_PATH}", flush=True)
+    print(f"[INIT] video_dir={VIDEO_DIR}", flush=True)
+    print(f"[INIT] video_codec={VIDEO_CODEC}", flush=True)
+    print(f"[INIT] video_ext={VIDEO_EXT}", flush=True)
+    print(f"[INIT] show_window={SHOW_WINDOW}", flush=True)
 
     vit_model = None
     coatnet_model = None
@@ -1226,11 +1326,14 @@ def main():
 
             frame = proc.get_frame()
 
-            if frame is not None:
-                cv2.imshow("Drowsiness Detection", frame)
+            if SHOW_WINDOW:
+                if frame is not None:
+                    cv2.imshow("Drowsiness Detection", frame)
 
-            if cv2.waitKey(1) & 0xFF == ord("q"):
-                break
+                if cv2.waitKey(1) & 0xFF == ord("q"):
+                    break
+            else:
+                time.sleep(0.03)
 
     except KeyboardInterrupt:
         print("[INFO] stopped_by_user", flush=True)
@@ -1256,7 +1359,8 @@ def main():
         if coatnet_model:
             coatnet_model.release()
 
-        cv2.destroyAllWindows()
+        if SHOW_WINDOW:
+            cv2.destroyAllWindows()
 
         print("[INFO] done", flush=True)
 
