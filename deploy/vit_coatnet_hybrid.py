@@ -4,6 +4,10 @@ import numpy as np
 import threading
 import queue
 import sys
+import sqlite3
+import uuid
+import time
+from datetime import datetime
 
 
 CAMERA_INDEX = 0
@@ -24,6 +28,10 @@ QUEUE_MAXSIZE = 2
 
 DEBUG_MODE = False
 USE_FLOAT_NORMALIZATION = False
+
+DB_PATH = "drowsiness_events.db"
+VIDEO_DIR = "drowsy_videos"
+VIDEO_CODEC = "mp4v"
 
 
 def validate_face_detector():
@@ -280,6 +288,572 @@ class EventTracker:
             )
 
 
+class LocalEventDB:
+    def __init__(self, db_path=DB_PATH):
+        self.db_path = db_path
+        self.lock = threading.Lock()
+        self._init_db()
+
+    def _connect(self):
+        return sqlite3.connect(self.db_path, check_same_thread=False)
+
+    def _init_db(self):
+        with self._connect() as conn:
+            cur = conn.cursor()
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+                    event_uid TEXT UNIQUE NOT NULL,
+
+                    start_time_local TEXT NOT NULL,
+                    confirmed_time_local TEXT,
+                    end_time_local TEXT NOT NULL,
+
+                    duration_sec REAL NOT NULL,
+                    confirmation_sec REAL NOT NULL,
+
+                    frame_count INTEGER NOT NULL,
+                    fps REAL NOT NULL,
+
+                    video_path TEXT NOT NULL,
+
+                    avg_prob REAL,
+                    max_prob REAL,
+                    min_prob REAL,
+
+                    avg_smooth_prob REAL,
+                    max_smooth_prob REAL,
+                    min_smooth_prob REAL,
+
+                    avg_vit_prob REAL,
+                    max_vit_prob REAL,
+                    min_vit_prob REAL,
+
+                    avg_coatnet_prob REAL,
+                    max_coatnet_prob REAL,
+                    min_coatnet_prob REAL,
+
+                    avg_face_conf REAL,
+                    max_face_conf REAL,
+                    min_face_conf REAL,
+
+                    created_at TEXT NOT NULL
+                )
+            """)
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS frame_predictions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+                    event_uid TEXT NOT NULL,
+
+                    local_timestamp TEXT NOT NULL,
+                    elapsed_sec REAL NOT NULL,
+
+                    frame_index INTEGER NOT NULL,
+
+                    status TEXT NOT NULL,
+
+                    prob REAL,
+                    smooth_prob REAL,
+
+                    vit_prob REAL,
+                    coatnet_prob REAL,
+                    face_conf REAL,
+
+                    is_drowsy INTEGER NOT NULL,
+
+                    FOREIGN KEY(event_uid) REFERENCES events(event_uid)
+                )
+            """)
+
+            conn.commit()
+
+    def save_event(self, event_data, frame_predictions):
+        with self.lock:
+            with self._connect() as conn:
+                cur = conn.cursor()
+
+                cur.execute("""
+                    INSERT INTO events (
+                        event_uid,
+
+                        start_time_local,
+                        confirmed_time_local,
+                        end_time_local,
+
+                        duration_sec,
+                        confirmation_sec,
+
+                        frame_count,
+                        fps,
+
+                        video_path,
+
+                        avg_prob,
+                        max_prob,
+                        min_prob,
+
+                        avg_smooth_prob,
+                        max_smooth_prob,
+                        min_smooth_prob,
+
+                        avg_vit_prob,
+                        max_vit_prob,
+                        min_vit_prob,
+
+                        avg_coatnet_prob,
+                        max_coatnet_prob,
+                        min_coatnet_prob,
+
+                        avg_face_conf,
+                        max_face_conf,
+                        min_face_conf,
+
+                        created_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    event_data["event_uid"],
+
+                    event_data["start_time_local"],
+                    event_data["confirmed_time_local"],
+                    event_data["end_time_local"],
+
+                    event_data["duration_sec"],
+                    event_data["confirmation_sec"],
+
+                    event_data["frame_count"],
+                    event_data["fps"],
+
+                    event_data["video_path"],
+
+                    event_data["avg_prob"],
+                    event_data["max_prob"],
+                    event_data["min_prob"],
+
+                    event_data["avg_smooth_prob"],
+                    event_data["max_smooth_prob"],
+                    event_data["min_smooth_prob"],
+
+                    event_data["avg_vit_prob"],
+                    event_data["max_vit_prob"],
+                    event_data["min_vit_prob"],
+
+                    event_data["avg_coatnet_prob"],
+                    event_data["max_coatnet_prob"],
+                    event_data["min_coatnet_prob"],
+
+                    event_data["avg_face_conf"],
+                    event_data["max_face_conf"],
+                    event_data["min_face_conf"],
+
+                    event_data["created_at"]
+                ))
+
+                cur.executemany("""
+                    INSERT INTO frame_predictions (
+                        event_uid,
+                        local_timestamp,
+                        elapsed_sec,
+
+                        frame_index,
+                        status,
+
+                        prob,
+                        smooth_prob,
+
+                        vit_prob,
+                        coatnet_prob,
+                        face_conf,
+
+                        is_drowsy
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, [
+                    (
+                        p["event_uid"],
+                        p["local_timestamp"],
+                        p["elapsed_sec"],
+
+                        p["frame_index"],
+                        p["status"],
+
+                        p["prob"],
+                        p["smooth_prob"],
+
+                        p["vit_prob"],
+                        p["coatnet_prob"],
+                        p["face_conf"],
+
+                        p["is_drowsy"]
+                    )
+                    for p in frame_predictions
+                ])
+
+                conn.commit()
+
+
+class ContinuousDrowsyEventRecorder:
+    def __init__(
+        self,
+        db,
+        fps,
+        min_confirm_sec=MIN_EVENT_SEC,
+        video_dir=VIDEO_DIR
+    ):
+        self.db = db
+        self.fps = fps if fps and fps > 1 else 30.0
+        self.min_confirm_sec = float(min_confirm_sec)
+        self.video_dir = video_dir
+
+        os.makedirs(self.video_dir, exist_ok=True)
+
+        self.lock = threading.Lock()
+
+        self.active = False
+        self.confirmed = False
+
+        self.writer = None
+
+        self.event_uid = None
+        self.video_path = None
+
+        self.start_time_perf = None
+        self.confirmed_time_perf = None
+        self.end_time_perf = None
+
+        self.start_time_local = None
+        self.confirmed_time_local = None
+        self.end_time_local = None
+
+        self.frame_count = 0
+
+        self.frame_predictions = []
+
+        self.probs = []
+        self.smooth_probs = []
+        self.vit_probs = []
+        self.coatnet_probs = []
+        self.face_confs = []
+
+    def _now_local(self):
+        return datetime.now().astimezone().isoformat(timespec="milliseconds")
+
+    def _new_video_path(self):
+        timestamp_for_file = datetime.now().astimezone().strftime("%Y%m%d_%H%M%S_%f")
+
+        return os.path.join(
+            self.video_dir,
+            f"drowsy_{timestamp_for_file}_{self.event_uid[:8]}.mp4"
+        )
+
+    def _start_candidate_event(self, frame):
+        self.active = True
+        self.confirmed = False
+
+        self.event_uid = str(uuid.uuid4())
+        self.video_path = self._new_video_path()
+
+        self.start_time_perf = time.perf_counter()
+        self.confirmed_time_perf = None
+        self.end_time_perf = None
+
+        self.start_time_local = self._now_local()
+        self.confirmed_time_local = None
+        self.end_time_local = None
+
+        self.frame_count = 0
+
+        self.frame_predictions = []
+
+        self.probs = []
+        self.smooth_probs = []
+        self.vit_probs = []
+        self.coatnet_probs = []
+        self.face_confs = []
+
+        h, w = frame.shape[:2]
+
+        fourcc = cv2.VideoWriter_fourcc(*VIDEO_CODEC)
+
+        self.writer = cv2.VideoWriter(
+            self.video_path,
+            fourcc,
+            self.fps,
+            (w, h)
+        )
+
+        if not self.writer.isOpened():
+            raise RuntimeError(f"Не удалось открыть VideoWriter: {self.video_path}")
+
+        print(
+            f"[EVENT] candidate_started "
+            f"uid={self.event_uid} "
+            f"video={self.video_path}",
+            flush=True
+        )
+
+    def update(
+        self,
+        frame,
+        is_drowsy,
+        status,
+        prob=None,
+        smooth_prob=None,
+        vit_prob=None,
+        coatnet_prob=None,
+        face_conf=None
+    ):
+        with self.lock:
+            if is_drowsy:
+                if not self.active:
+                    self._start_candidate_event(frame)
+
+                self._write_drowsy_frame(
+                    frame=frame,
+                    status=status,
+                    prob=prob,
+                    smooth_prob=smooth_prob,
+                    vit_prob=vit_prob,
+                    coatnet_prob=coatnet_prob,
+                    face_conf=face_conf
+                )
+
+                self._check_confirmation()
+
+            else:
+                if self.active:
+                    if self.confirmed:
+                        self._finish_confirmed_event()
+                    else:
+                        self._discard_candidate_event(
+                            reason=f"{status}_before_confirmation"
+                        )
+
+    def _write_drowsy_frame(
+        self,
+        frame,
+        status,
+        prob=None,
+        smooth_prob=None,
+        vit_prob=None,
+        coatnet_prob=None,
+        face_conf=None
+    ):
+        if self.writer is not None:
+            self.writer.write(frame)
+
+        self.frame_count += 1
+
+        now_perf = time.perf_counter()
+        elapsed_sec = now_perf - self.start_time_perf
+
+        self.frame_predictions.append({
+            "event_uid": self.event_uid,
+            "local_timestamp": self._now_local(),
+            "elapsed_sec": float(elapsed_sec),
+
+            "frame_index": int(self.frame_count),
+            "status": status,
+
+            "prob": float(prob) if prob is not None else None,
+            "smooth_prob": float(smooth_prob) if smooth_prob is not None else None,
+
+            "vit_prob": float(vit_prob) if vit_prob is not None else None,
+            "coatnet_prob": float(coatnet_prob) if coatnet_prob is not None else None,
+            "face_conf": float(face_conf) if face_conf is not None else None,
+
+            "is_drowsy": 1
+        })
+
+        if prob is not None:
+            self.probs.append(float(prob))
+
+        if smooth_prob is not None:
+            self.smooth_probs.append(float(smooth_prob))
+
+        if vit_prob is not None:
+            self.vit_probs.append(float(vit_prob))
+
+        if coatnet_prob is not None:
+            self.coatnet_probs.append(float(coatnet_prob))
+
+        if face_conf is not None:
+            self.face_confs.append(float(face_conf))
+
+    def _check_confirmation(self):
+        if not self.active or self.confirmed:
+            return
+
+        elapsed_sec = time.perf_counter() - self.start_time_perf
+
+        if elapsed_sec >= self.min_confirm_sec:
+            self.confirmed = True
+            self.confirmed_time_perf = time.perf_counter()
+            self.confirmed_time_local = self._now_local()
+
+            print(
+                f"[EVENT] confirmed "
+                f"uid={self.event_uid} "
+                f"confirmation_sec={elapsed_sec:.2f} "
+                f"frames={self.frame_count}",
+                flush=True
+            )
+
+    def _finish_confirmed_event(self):
+        self.end_time_perf = time.perf_counter()
+        self.end_time_local = self._now_local()
+
+        if self.writer is not None:
+            self.writer.release()
+            self.writer = None
+
+        duration_sec = self.end_time_perf - self.start_time_perf
+
+        event_data = {
+            "event_uid": self.event_uid,
+
+            "start_time_local": self.start_time_local,
+            "confirmed_time_local": self.confirmed_time_local,
+            "end_time_local": self.end_time_local,
+
+            "duration_sec": float(duration_sec),
+            "confirmation_sec": float(self.min_confirm_sec),
+
+            "frame_count": int(self.frame_count),
+            "fps": float(self.fps),
+
+            "video_path": self.video_path,
+
+            "avg_prob": self._safe_avg(self.probs),
+            "max_prob": self._safe_max(self.probs),
+            "min_prob": self._safe_min(self.probs),
+
+            "avg_smooth_prob": self._safe_avg(self.smooth_probs),
+            "max_smooth_prob": self._safe_max(self.smooth_probs),
+            "min_smooth_prob": self._safe_min(self.smooth_probs),
+
+            "avg_vit_prob": self._safe_avg(self.vit_probs),
+            "max_vit_prob": self._safe_max(self.vit_probs),
+            "min_vit_prob": self._safe_min(self.vit_probs),
+
+            "avg_coatnet_prob": self._safe_avg(self.coatnet_probs),
+            "max_coatnet_prob": self._safe_max(self.coatnet_probs),
+            "min_coatnet_prob": self._safe_min(self.coatnet_probs),
+
+            "avg_face_conf": self._safe_avg(self.face_confs),
+            "max_face_conf": self._safe_max(self.face_confs),
+            "min_face_conf": self._safe_min(self.face_confs),
+
+            "created_at": self._now_local()
+        }
+
+        self.db.save_event(event_data, self.frame_predictions)
+
+        print(
+            f"[EVENT] saved "
+            f"uid={self.event_uid} "
+            f"duration={duration_sec:.2f}s "
+            f"frames={self.frame_count} "
+            f"video={self.video_path}",
+            flush=True
+        )
+
+        self._reset()
+
+    def _discard_candidate_event(self, reason):
+        if self.writer is not None:
+            self.writer.release()
+            self.writer = None
+
+        duration_sec = 0.0
+
+        if self.start_time_perf is not None:
+            duration_sec = time.perf_counter() - self.start_time_perf
+
+        print(
+            f"[EVENT] discarded "
+            f"uid={self.event_uid} "
+            f"reason={reason} "
+            f"duration={duration_sec:.2f}s "
+            f"frames={self.frame_count}",
+            flush=True
+        )
+
+        if self.video_path and os.path.exists(self.video_path):
+            try:
+                os.remove(self.video_path)
+            except OSError as e:
+                print(
+                    f"[WARN] cannot_remove_candidate_video "
+                    f"path={self.video_path} "
+                    f"error={e}",
+                    flush=True
+                )
+
+        self._reset()
+
+    def force_end(self):
+        with self.lock:
+            if not self.active:
+                return
+
+            if self.confirmed:
+                self._finish_confirmed_event()
+            else:
+                self._discard_candidate_event(
+                    reason="program_stopped_before_confirmation"
+                )
+
+    def _safe_avg(self, values):
+        if not values:
+            return None
+
+        return float(sum(values) / len(values))
+
+    def _safe_max(self, values):
+        if not values:
+            return None
+
+        return float(max(values))
+
+    def _safe_min(self, values):
+        if not values:
+            return None
+
+        return float(min(values))
+
+    def _reset(self):
+        self.active = False
+        self.confirmed = False
+
+        self.writer = None
+
+        self.event_uid = None
+        self.video_path = None
+
+        self.start_time_perf = None
+        self.confirmed_time_perf = None
+        self.end_time_perf = None
+
+        self.start_time_local = None
+        self.confirmed_time_local = None
+        self.end_time_local = None
+
+        self.frame_count = 0
+
+        self.frame_predictions = []
+
+        self.probs = []
+        self.smooth_probs = []
+        self.vit_probs = []
+        self.coatnet_probs = []
+        self.face_confs = []
+
+
 class CameraThread:
     def __init__(self, idx=0):
         self.cap = cv2.VideoCapture(idx)
@@ -325,7 +899,8 @@ class ProcessingThread:
         coatnet_model,
         face_net,
         smoother,
-        tracker
+        tracker,
+        event_recorder
     ):
         self.cam = cam
         self.vit = vit_model
@@ -333,6 +908,7 @@ class ProcessingThread:
         self.face_net = face_net
         self.smoother = smoother
         self.tracker = tracker
+        self.event_recorder = event_recorder
 
         self.stop = False
         self.display_frame = None
@@ -379,9 +955,15 @@ class ProcessingThread:
 
                 draw = frame.copy()
 
-                status = "NO FACE"
+                status = "NO_FACE"
                 color = (255, 255, 255)
                 is_drowsy = False
+
+                current_prob = None
+                current_smooth_prob = None
+                current_vit_prob = None
+                current_coat_prob = None
+                current_face_conf = None
 
                 box, face_conf = detect_face(self.face_net, frame)
 
@@ -396,10 +978,17 @@ class ProcessingThread:
 
                     cls, smooth_prob = self.smoother.add(prob)
 
+                    current_prob = prob
+                    current_smooth_prob = smooth_prob
+                    current_vit_prob = vit_prob
+                    current_coat_prob = coat_prob
+                    current_face_conf = face_conf
+
                     if cls == 1:
                         is_drowsy = True
                         status = "DROWSY"
                         color = (0, 0, 255)
+
                         self.log_state(
                             state="DROWSY",
                             prob=smooth_prob,
@@ -408,10 +997,12 @@ class ProcessingThread:
                             face_conf=face_conf
                         )
                     else:
-                        status = "AWAKE"
+                        is_drowsy = False
+                        status = "NON_DROWSY"
                         color = (0, 255, 0)
+
                         self.log_state(
-                            state="AWAKE",
+                            state="NON_DROWSY",
                             prob=smooth_prob,
                             vit_prob=vit_prob,
                             coat_prob=coat_prob,
@@ -466,6 +1057,17 @@ class ProcessingThread:
                     2
                 )
 
+                self.event_recorder.update(
+                    frame=draw,
+                    is_drowsy=is_drowsy,
+                    status=status,
+                    prob=current_prob,
+                    smooth_prob=current_smooth_prob,
+                    vit_prob=current_vit_prob,
+                    coatnet_prob=current_coat_prob,
+                    face_conf=current_face_conf
+                )
+
                 with self.lock:
                     self.display_frame = draw
 
@@ -493,6 +1095,8 @@ def main():
     cam = None
     proc = None
     tracker = None
+    db = None
+    event_recorder = None
 
     try:
         vit_model = RKNNClassifier(
@@ -531,13 +1135,23 @@ def main():
         min_sec=MIN_EVENT_SEC
     )
 
+    db = LocalEventDB(DB_PATH)
+
+    event_recorder = ContinuousDrowsyEventRecorder(
+        db=db,
+        fps=fps,
+        min_confirm_sec=MIN_EVENT_SEC,
+        video_dir=VIDEO_DIR
+    )
+
     proc = ProcessingThread(
         cam=cam,
         vit_model=vit_model,
         coatnet_model=coatnet_model,
         face_net=face_net,
         smoother=smoother,
-        tracker=tracker
+        tracker=tracker,
+        event_recorder=event_recorder
     )
 
     print("[INIT] pipeline_started", flush=True)
@@ -570,6 +1184,9 @@ def main():
 
         if tracker:
             tracker.force_end()
+
+        if event_recorder:
+            event_recorder.force_end()
 
         if vit_model:
             vit_model.release()
