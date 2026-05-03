@@ -33,10 +33,12 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 DB_PATH = os.path.join(BASE_DIR, "drowsiness_events.db")
 VIDEO_DIR = os.path.join(BASE_DIR, "drowsy_videos")
+LATEST_FRAME_PATH = os.path.join(BASE_DIR, "latest_frame.jpg")
 
 VIDEO_CODEC = "MJPG"
 VIDEO_EXT = ".avi"
-VIDEO_FPS = 12.0
+VIDEO_FPS = 8.0
+SNAPSHOT_INTERVAL_SEC = 0.5
 
 SHOW_WINDOW = os.environ.get("SHOW_WINDOW", "0") == "1"
 
@@ -990,6 +992,7 @@ class ProcessingThread:
 
         self.processed_frames = 0
         self.last_processing_log_time = time.perf_counter()
+        self.last_snapshot_time = 0.0
 
         self.thread = threading.Thread(target=self._run, daemon=True)
         self.thread.start()
@@ -1018,6 +1021,23 @@ class ProcessingThread:
             )
 
         self.prev_state = state
+
+    def _write_latest_snapshot(self, frame):
+        now = time.perf_counter()
+
+        if now - self.last_snapshot_time < SNAPSHOT_INTERVAL_SEC:
+            return
+
+        tmp_path = f"{LATEST_FRAME_PATH}.tmp"
+
+        try:
+            ok = cv2.imwrite(tmp_path, frame)
+
+            if ok:
+                os.replace(tmp_path, LATEST_FRAME_PATH)
+                self.last_snapshot_time = now
+        except Exception as e:
+            print(f"[WARN] cannot_write_latest_frame error={e}", flush=True)
 
     def _run(self):
         try:
@@ -1156,6 +1176,8 @@ class ProcessingThread:
 
                 with self.lock:
                     self.display_frame = draw
+
+                self._write_latest_snapshot(draw)
 
         except Exception as e:
             self.error = e
