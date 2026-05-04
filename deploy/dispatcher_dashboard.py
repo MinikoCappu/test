@@ -1,17 +1,27 @@
 import os
+import json
 import sqlite3
 import time
+import urllib.error
+import urllib.request
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = Path(os.environ.get("DROWSINESS_DB_PATH", BASE_DIR / "drowsiness_events.db"))
 VIDEO_DIR = Path(os.environ.get("DROWSINESS_VIDEO_DIR", BASE_DIR / "drowsy_videos"))
 LATEST_FRAME_PATH = Path(os.environ.get("DROWSINESS_LATEST_FRAME_PATH", BASE_DIR / "latest_frame.jpg"))
+LIVE_STREAM_PORT = int(os.environ.get("DROWSINESS_LIVE_STREAM_PORT", "8080"))
+LIVE_STREAM_PUBLIC_URL = os.environ.get("DROWSINESS_LIVE_STREAM_PUBLIC_URL", "")
+LIVE_STREAM_HEALTH_URL = os.environ.get(
+    "DROWSINESS_LIVE_STREAM_HEALTH_URL",
+    f"http://127.0.0.1:{LIVE_STREAM_PORT}/health"
+)
 
 
 st.set_page_config(
@@ -165,6 +175,23 @@ def get_health(events):
     return db_status, snapshot_status, video_dir_status, latest_event_dt
 
 
+@st.cache_data(ttl=2)
+def get_live_stream_status():
+    try:
+        with urllib.request.urlopen(LIVE_STREAM_HEALTH_URL, timeout=1.0) as response:
+            body = response.read(512).decode("utf-8", errors="replace")
+    except (OSError, urllib.error.URLError):
+        return "offline", ""
+
+    if "status=online" in body:
+        return "online", body
+
+    if "status=waiting_for_frame" in body:
+        return "waiting", body
+
+    return "unknown", body
+
+
 def render_sidebar():
     st.sidebar.title("Панель")
     refresh = st.sidebar.checkbox("Автообновление", value=True)
@@ -179,23 +206,72 @@ def render_sidebar():
     st.sidebar.caption(f"DB: {DB_PATH}")
     st.sidebar.caption(f"Видео: {VIDEO_DIR}")
     st.sidebar.caption(f"Кадр: {LATEST_FRAME_PATH}")
+    st.sidebar.caption(f"MJPEG: :{LIVE_STREAM_PORT}/video")
 
     return refresh, interval, limit
 
 
+def render_mjpeg_stream():
+    configured_url = LIVE_STREAM_PUBLIC_URL.strip()
+    configured_json = json.dumps(configured_url)
+
+    html = f"""
+    <div style="width:100%; background:#111827; border-radius:6px; overflow:hidden;">
+      <img id="mjpeg-live"
+           alt="MJPEG live stream"
+           style="display:block; width:100%; height:auto; min-height:260px; object-fit:contain;" />
+    </div>
+    <script>
+      const configuredUrl = {configured_json};
+      let src = configuredUrl;
+
+      if (!src) {{
+        let protocol = "http:";
+        let host = window.location.hostname;
+
+        try {{
+          protocol = window.parent.location.protocol || protocol;
+          host = window.parent.location.hostname || host;
+        }} catch (e) {{}}
+
+        src = protocol + "//" + host + ":{LIVE_STREAM_PORT}/video";
+      }}
+
+      const sep = src.includes("?") ? "&" : "?";
+      document.getElementById("mjpeg-live").src = src + sep + "t=" + Date.now();
+    </script>
+    """
+
+    components.html(html, height=420)
+
+
 def render_live_frame():
     st.subheader("Камера")
+    live_status, live_details = get_live_stream_status()
+
+    if live_status == "online":
+        render_mjpeg_stream()
+        st.caption(f"MJPEG live: {LIVE_STREAM_HEALTH_URL.replace('/health', '/video')}")
+        return
+
+    if live_status == "waiting":
+        st.info("MJPEG-сервер запущен и ждёт первый обработанный кадр.")
+        render_mjpeg_stream()
+        return
 
     if LATEST_FRAME_PATH.exists():
         mtime = datetime.fromtimestamp(LATEST_FRAME_PATH.stat().st_mtime)
         age = datetime.now() - mtime
 
         st.image(str(LATEST_FRAME_PATH), use_container_width=True)
-        st.caption(f"Последний кадр: {mtime.strftime('%Y-%m-%d %H:%M:%S')} ({age.seconds}s назад)")
+        st.caption(
+            f"MJPEG недоступен, показан fallback-кадр: "
+            f"{mtime.strftime('%Y-%m-%d %H:%M:%S')} ({age.seconds}s назад)"
+        )
     else:
         st.info(
-            "Кадр пока не найден. Запусти или проверь основной сервис vit_coatnet, "
-            "после обработки первого кадра здесь появится изображение."
+            "MJPEG-поток и fallback-кадр пока недоступны. "
+            "Запусти или проверь основной сервис vit_coatnet."
         )
 
 
@@ -330,7 +406,8 @@ def main():
     st.title("Диспетчер усталости")
 
     db_status, snapshot_status, video_dir_status, latest_event_dt = get_health(events)
-    status_cols = st.columns(4)
+    live_status, _ = get_live_stream_status()
+    status_cols = st.columns(5)
     status_cols[0].markdown(
         f"DB: <span class='{'status-ok' if db_status else 'status-warn'}'>"
         f"{'online' if db_status else 'missing'}</span>",
@@ -347,6 +424,11 @@ def main():
         unsafe_allow_html=True,
     )
     status_cols[3].markdown(
+        f"MJPEG: <span class='{'status-ok' if live_status == 'online' else 'status-warn'}'>"
+        f"{live_status}</span>",
+        unsafe_allow_html=True,
+    )
+    status_cols[4].markdown(
         f"Последнее событие: <span class='muted'>"
         f"{latest_event_dt.strftime('%Y-%m-%d %H:%M:%S') if latest_event_dt else 'n/a'}</span>",
         unsafe_allow_html=True,

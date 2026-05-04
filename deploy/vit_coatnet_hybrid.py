@@ -8,6 +8,7 @@ import sqlite3
 import uuid
 import time
 from datetime import datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
 CAMERA_INDEX = 0
@@ -39,6 +40,12 @@ VIDEO_CODEC = "MJPG"
 VIDEO_EXT = ".avi"
 VIDEO_FPS = 8.0
 SNAPSHOT_INTERVAL_SEC = 0.5
+
+LIVE_STREAM_ENABLED = os.environ.get("LIVE_STREAM_ENABLED", "1") == "1"
+LIVE_STREAM_HOST = os.environ.get("LIVE_STREAM_HOST", "0.0.0.0")
+LIVE_STREAM_PORT = int(os.environ.get("LIVE_STREAM_PORT", "8080"))
+LIVE_STREAM_MAX_FPS = float(os.environ.get("LIVE_STREAM_MAX_FPS", "8.0"))
+LIVE_STREAM_JPEG_QUALITY = int(os.environ.get("LIVE_STREAM_JPEG_QUALITY", "80"))
 
 SHOW_WINDOW = os.environ.get("SHOW_WINDOW", "0") == "1"
 
@@ -862,6 +869,137 @@ class ContinuousDrowsyEventRecorder:
         self.face_confs = []
 
 
+class LiveFrameBuffer:
+    def __init__(self):
+        self.condition = threading.Condition()
+        self.jpeg_bytes = None
+        self.frame_id = 0
+        self.updated_at = None
+
+    def update(self, frame):
+        if frame is None or frame.size == 0:
+            return
+
+        ok, encoded = cv2.imencode(
+            ".jpg",
+            frame,
+            [int(cv2.IMWRITE_JPEG_QUALITY), LIVE_STREAM_JPEG_QUALITY]
+        )
+
+        if not ok:
+            return
+
+        with self.condition:
+            self.jpeg_bytes = encoded.tobytes()
+            self.frame_id += 1
+            self.updated_at = time.time()
+            self.condition.notify_all()
+
+    def wait_for_frame(self, last_frame_id, timeout=2.0):
+        with self.condition:
+            if self.frame_id == last_frame_id:
+                self.condition.wait(timeout=timeout)
+
+            return self.frame_id, self.jpeg_bytes, self.updated_at
+
+    def snapshot(self):
+        with self.condition:
+            return self.frame_id, self.jpeg_bytes, self.updated_at
+
+
+class LiveStreamHandler(BaseHTTPRequestHandler):
+    frame_buffer = None
+    protocol_version = "HTTP/1.0"
+
+    def do_GET(self):
+        if self.path in ("/", "/health"):
+            self._handle_health()
+            return
+
+        if self.path.startswith("/video"):
+            self._handle_video()
+            return
+
+        self.send_error(404, "Not found")
+
+    def _handle_health(self):
+        frame_id, jpeg_bytes, updated_at = self.frame_buffer.snapshot()
+        status = "online" if jpeg_bytes is not None else "waiting_for_frame"
+        age = 0.0 if updated_at is None else max(0.0, time.time() - updated_at)
+        body = (
+            f"status={status}\n"
+            f"frame_id={frame_id}\n"
+            f"age_sec={age:.3f}\n"
+        ).encode("utf-8")
+
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _handle_video(self):
+        self.send_response(200)
+        self.send_header("Age", "0")
+        self.send_header("Cache-Control", "no-cache, private")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+        self.end_headers()
+
+        last_frame_id = 0
+
+        try:
+            while True:
+                frame_id, jpeg_bytes, _ = self.frame_buffer.wait_for_frame(last_frame_id)
+
+                if jpeg_bytes is None or frame_id == last_frame_id:
+                    continue
+
+                last_frame_id = frame_id
+
+                self.wfile.write(b"--frame\r\n")
+                self.wfile.write(b"Content-Type: image/jpeg\r\n")
+                self.wfile.write(f"Content-Length: {len(jpeg_bytes)}\r\n\r\n".encode("ascii"))
+                self.wfile.write(jpeg_bytes)
+                self.wfile.write(b"\r\n")
+                self.wfile.flush()
+
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            return
+
+    def log_message(self, _format, *args):
+        return
+
+
+class MJPEGLiveServer:
+    def __init__(self, host, port, frame_buffer):
+        handler_class = type(
+            "ConfiguredLiveStreamHandler",
+            (LiveStreamHandler,),
+            {"frame_buffer": frame_buffer}
+        )
+
+        self.server = ThreadingHTTPServer((host, port), handler_class)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.host = host
+        self.port = port
+
+    def start(self):
+        print(
+            f"[LIVE] mjpeg_server_started "
+            f"host={self.host} port={self.port} "
+            f"max_fps={LIVE_STREAM_MAX_FPS:.2f}",
+            flush=True
+        )
+        self.thread.start()
+
+    def close(self):
+        print("[LIVE] mjpeg_server_stopping", flush=True)
+        self.server.shutdown()
+        self.server.server_close()
+
+
 class CameraThread:
     def __init__(self, idx=0):
         self.idx = idx
@@ -973,7 +1111,8 @@ class ProcessingThread:
         face_net,
         smoother,
         tracker,
-        event_recorder
+        event_recorder,
+        live_frame_buffer=None
     ):
         self.cam = cam
         self.vit = vit_model
@@ -982,6 +1121,7 @@ class ProcessingThread:
         self.smoother = smoother
         self.tracker = tracker
         self.event_recorder = event_recorder
+        self.live_frame_buffer = live_frame_buffer
 
         self.stop = False
         self.display_frame = None
@@ -993,6 +1133,7 @@ class ProcessingThread:
         self.processed_frames = 0
         self.last_processing_log_time = time.perf_counter()
         self.last_snapshot_time = 0.0
+        self.last_live_frame_time = 0.0
 
         self.thread = threading.Thread(target=self._run, daemon=True)
         self.thread.start()
@@ -1038,6 +1179,19 @@ class ProcessingThread:
                 self.last_snapshot_time = now
         except Exception as e:
             print(f"[WARN] cannot_write_latest_frame error={e}", flush=True)
+
+    def _update_live_stream(self, frame):
+        if self.live_frame_buffer is None:
+            return
+
+        now = time.perf_counter()
+        min_interval = 1.0 / LIVE_STREAM_MAX_FPS if LIVE_STREAM_MAX_FPS > 0 else 0.0
+
+        if now - self.last_live_frame_time < min_interval:
+            return
+
+        self.live_frame_buffer.update(frame)
+        self.last_live_frame_time = now
 
     def _run(self):
         try:
@@ -1178,6 +1332,7 @@ class ProcessingThread:
                     self.display_frame = draw
 
                 self._write_latest_snapshot(draw)
+                self._update_live_stream(draw)
 
         except Exception as e:
             self.error = e
@@ -1202,6 +1357,9 @@ def main():
     print(f"[INIT] video_codec={VIDEO_CODEC}", flush=True)
     print(f"[INIT] video_ext={VIDEO_EXT}", flush=True)
     print(f"[INIT] video_fps={VIDEO_FPS:.2f}", flush=True)
+    print(f"[INIT] live_stream_enabled={LIVE_STREAM_ENABLED}", flush=True)
+    print(f"[INIT] live_stream_host={LIVE_STREAM_HOST}", flush=True)
+    print(f"[INIT] live_stream_port={LIVE_STREAM_PORT}", flush=True)
     print(f"[INIT] show_window={SHOW_WINDOW}", flush=True)
 
     vit_model = None
@@ -1212,6 +1370,8 @@ def main():
     tracker = None
     db = None
     event_recorder = None
+    live_frame_buffer = None
+    live_stream_server = None
 
     try:
         vit_model = RKNNClassifier(
@@ -1262,6 +1422,18 @@ def main():
         video_dir=VIDEO_DIR
     )
 
+    if LIVE_STREAM_ENABLED:
+        try:
+            live_frame_buffer = LiveFrameBuffer()
+            live_stream_server = MJPEGLiveServer(
+                LIVE_STREAM_HOST,
+                LIVE_STREAM_PORT,
+                live_frame_buffer
+            )
+            live_stream_server.start()
+        except Exception as e:
+            print(f"[WARN] mjpeg_server_not_started error={e}", flush=True)
+
     proc = ProcessingThread(
         cam=cam,
         vit_model=vit_model,
@@ -1269,7 +1441,8 @@ def main():
         face_net=face_net,
         smoother=smoother,
         tracker=tracker,
-        event_recorder=event_recorder
+        event_recorder=event_recorder,
+        live_frame_buffer=live_frame_buffer
     )
 
     print("[INIT] pipeline_started", flush=True)
@@ -1299,6 +1472,9 @@ def main():
 
         if proc:
             proc.close()
+
+        if live_stream_server:
+            live_stream_server.close()
 
         if cam:
             cam.close()

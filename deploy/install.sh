@@ -300,6 +300,10 @@ User=root
 WorkingDirectory=$SCRIPT_DIR
 Environment=PYTHONUNBUFFERED=1
 Environment=SHOW_WINDOW=0
+Environment=LIVE_STREAM_ENABLED=1
+Environment=LIVE_STREAM_HOST=0.0.0.0
+Environment=LIVE_STREAM_PORT=8080
+Environment=LIVE_STREAM_MAX_FPS=8
 ExecStart=$PYTHON_PATH $PY_SCRIPT
 Restart=always
 RestartSec=3

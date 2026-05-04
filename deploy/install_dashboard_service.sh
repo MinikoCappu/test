@@ -15,6 +15,7 @@ SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 PYTHON_PATH="$(command -v python3)"
 DASHBOARD_PORT="${DASHBOARD_PORT:-8501}"
 DASHBOARD_HOST="${DASHBOARD_HOST:-0.0.0.0}"
+LIVE_STREAM_PORT="${LIVE_STREAM_PORT:-8080}"
 DB_PATH="$SCRIPT_DIR/drowsiness_events.db"
 VIDEO_DIR="$SCRIPT_DIR/drowsy_videos"
 LATEST_FRAME_PATH="$SCRIPT_DIR/latest_frame.jpg"
@@ -53,6 +54,8 @@ Environment=PYTHONUNBUFFERED=1
 Environment=DROWSINESS_DB_PATH=$DB_PATH
 Environment=DROWSINESS_VIDEO_DIR=$VIDEO_DIR
 Environment=DROWSINESS_LATEST_FRAME_PATH=$LATEST_FRAME_PATH
+Environment=DROWSINESS_LIVE_STREAM_PORT=$LIVE_STREAM_PORT
+Environment=DROWSINESS_LIVE_STREAM_HEALTH_URL=http://127.0.0.1:$LIVE_STREAM_PORT/health
 Environment=STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
 ExecStart=$PYTHON_PATH -m streamlit run $SCRIPT_DIR/dispatcher_dashboard.py --server.address $DASHBOARD_HOST --server.port $DASHBOARD_PORT --server.headless true
 Restart=always
@@ -72,6 +75,7 @@ systemctl restart "$SERVICE_NAME"
 echo "[OK] Dashboard service started"
 echo "URL локально:  http://127.0.0.1:$DASHBOARD_PORT"
 echo "URL в сети:    http://<IP_устройства>:$DASHBOARD_PORT"
+echo "MJPEG stream: http://<IP_устройства>:$LIVE_STREAM_PORT/video"
 echo ""
 echo "Статус:"
 echo "  systemctl status $SERVICE_NAME --no-pager"
