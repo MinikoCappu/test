@@ -315,10 +315,13 @@ def render_events_table(events):
     table["max"] = table["max_smooth_prob"].apply(fmt_prob)
     table["face"] = table["avg_face_conf"].apply(fmt_prob)
     table["video"] = table["video_path"].apply(lambda path: "yes" if video_exists(path)[0] else "missing")
+    table["video_name"] = table["video_path"].apply(
+        lambda p: Path(p).name if p else "n/a"
+    )
 
     display = table[
         [
-            "event_uid",
+            "video_name",
             "start",
             "end",
             "duration",
@@ -335,7 +338,7 @@ def render_events_table(events):
         use_container_width=True,
         hide_index=True,
         column_config={
-            "event_uid": st.column_config.TextColumn("UID", width="medium"),
+            "video_name": st.column_config.TextColumn("Видео", width="large"),
             "start": "Начало",
             "end": "Конец",
             "duration": "Длительность",
@@ -343,12 +346,20 @@ def render_events_table(events):
             "avg": "Средн.",
             "max": "Макс.",
             "face": "Лицо",
-            "video": "Видео",
+            "video": "Файл",
         },
     )
 
-    options = events["event_uid"].tolist()
-    return st.selectbox("Открыть событие", options=options, format_func=lambda uid: uid[:8])
+    event_map = {
+        row["event_uid"]: Path(row["video_path"]).name if row["video_path"] else row["event_uid"]
+        for _, row in events.iterrows()
+    }
+
+    return st.selectbox(
+        "Открыть событие",
+        options=list(event_map.keys()),
+        format_func=lambda uid: event_map.get(uid, uid)
+    )
 
 
 def render_event_detail(events, event_uid):
