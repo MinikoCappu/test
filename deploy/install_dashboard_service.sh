@@ -30,7 +30,7 @@ if [ ! -f "$SCRIPT_DIR/dispatcher_dashboard.py" ]; then
   exit 1
 fi
 
-"$PYTHON_PATH" -m pip install -r "$SCRIPT_DIR/dashboard_requirements.txt"
+"$PYTHON_PATH" -m pip install -r "$SCRIPT_DIR/dashboard_requirements.txt" --ignore-installed
 
 if ! "$PYTHON_PATH" -m streamlit --version >/dev/null 2>&1; then
   echo "[ERROR] streamlit не запускается как Python-модуль"

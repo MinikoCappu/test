@@ -1080,7 +1080,7 @@ class CameraThread:
         self.cap = cv2.VideoCapture(self.idx)
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        self.cap.set(cv2.CAP_PROP_FPS, 30)
+        self.cap.set(cv2.CAP_PROP_FPS, VIDEO_FPS)
         self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
         if self.cap.isOpened():
