@@ -15,7 +15,7 @@
 ## Установка на устройстве
 
 ```bash
-cd /home/bairb/project/practice-project/test1/deploy
+cd ./test1/deploy
 sudo bash install.sh
 sudo bash install_dashboard_service.sh
 ```
