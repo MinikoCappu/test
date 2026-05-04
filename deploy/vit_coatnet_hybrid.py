@@ -535,13 +535,17 @@ class ContinuousDrowsyEventRecorder:
         self.confirmed = False
 
         self.event_uid = str(uuid.uuid4())
-        self.video_path = self._new_video_path()
 
         self.start_time_perf = time.perf_counter()
         self.confirmed_time_perf = None
         self.end_time_perf = None
 
         self.start_time_local = self._now_local()
+        self.confirmed_time_local = None
+        self.end_time_local = None
+
+        # теперь имя будет основано на start_time_local
+        self.video_path = self._new_video_path()
         self.confirmed_time_local = None
         self.end_time_local = None
 
