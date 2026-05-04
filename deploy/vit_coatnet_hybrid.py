@@ -519,13 +519,17 @@ class ContinuousDrowsyEventRecorder:
         return datetime.now().astimezone().isoformat(timespec="milliseconds")
 
     def _new_video_path(self):
-        timestamp_for_file = datetime.now().astimezone().strftime("%Y%m%d_%H%M%S_%f")
+        if self.start_time_local:
+            dt = datetime.fromisoformat(self.start_time_local)
+        else:
+            dt = datetime.now().astimezone()
+
+        timestamp_for_file = dt.strftime("%Y-%m-%d_%H-%M-%S")
 
         return os.path.join(
             self.video_dir,
-            f"drowsy_{timestamp_for_file}_{self.event_uid[:8]}{VIDEO_EXT}"
+            f"drowsy_{timestamp_for_file}{VIDEO_EXT}"
         )
-
     def _start_candidate_event(self, frame):
         self.active = True
         self.confirmed = False
