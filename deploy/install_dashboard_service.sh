@@ -30,6 +30,9 @@ if [ ! -f "$SCRIPT_DIR/dispatcher_dashboard.py" ]; then
   exit 1
 fi
 
+apt update
+apt install -y ffmpeg
+
 "$PYTHON_PATH" -m pip install -r "$SCRIPT_DIR/dashboard_requirements.txt" --ignore-installed
 
 if ! "$PYTHON_PATH" -m streamlit --version >/dev/null 2>&1; then
@@ -38,7 +41,8 @@ if ! "$PYTHON_PATH" -m streamlit --version >/dev/null 2>&1; then
 fi
 
 mkdir -p "$VIDEO_DIR"
-chmod 755 "$SCRIPT_DIR" "$VIDEO_DIR"
+mkdir -p "$VIDEO_DIR/web_videos"
+chmod 755 "$SCRIPT_DIR" "$VIDEO_DIR" "$VIDEO_DIR/web_videos"
 
 cat > "$SERVICE_FILE" <<EOF
 [Unit]
@@ -54,6 +58,7 @@ Environment=PYTHONUNBUFFERED=1
 Environment=DROWSINESS_DB_PATH=$DB_PATH
 Environment=DROWSINESS_VIDEO_DIR=$VIDEO_DIR
 Environment=DROWSINESS_LATEST_FRAME_PATH=$LATEST_FRAME_PATH
+Environment=DROWSINESS_WEB_VIDEO_DIR=$VIDEO_DIR/web_videos
 Environment=DROWSINESS_LIVE_STREAM_PORT=$LIVE_STREAM_PORT
 Environment=DROWSINESS_LIVE_STREAM_HEALTH_URL=http://127.0.0.1:$LIVE_STREAM_PORT/health
 Environment=STREAMLIT_BROWSER_GATHER_USAGE_STATS=false

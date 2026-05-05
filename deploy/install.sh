@@ -112,6 +112,7 @@ apt install -y \
   python3-dev \
   python3-venv \
   sqlite3 \
+  ffmpeg \
   v4l-utils \
   libgl1 \
   libglib2.0-0 \

@@ -1,6 +1,8 @@
 import os
 import json
+import shutil
 import sqlite3
+import subprocess
 import time
 import urllib.error
 import urllib.request
@@ -16,6 +18,7 @@ BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = Path(os.environ.get("DROWSINESS_DB_PATH", BASE_DIR / "drowsiness_events.db"))
 VIDEO_DIR = Path(os.environ.get("DROWSINESS_VIDEO_DIR", BASE_DIR / "drowsy_videos"))
 LATEST_FRAME_PATH = Path(os.environ.get("DROWSINESS_LATEST_FRAME_PATH", BASE_DIR / "latest_frame.jpg"))
+WEB_VIDEO_DIR = Path(os.environ.get("DROWSINESS_WEB_VIDEO_DIR", VIDEO_DIR / "web_videos"))
 LIVE_STREAM_PORT = int(os.environ.get("DROWSINESS_LIVE_STREAM_PORT", "8080"))
 LIVE_STREAM_PUBLIC_URL = os.environ.get("DROWSINESS_LIVE_STREAM_PUBLIC_URL", "")
 LIVE_STREAM_HEALTH_URL = os.environ.get(
@@ -161,6 +164,100 @@ def video_exists(video_path):
         path = BASE_DIR / path
 
     return path.exists(), path
+
+
+def web_video_path(source_path):
+    source_stat = source_path.stat()
+    safe_stem = "".join(
+        char if char.isalnum() or char in ("-", "_") else "_"
+        for char in source_path.stem
+    )
+    name = f"{safe_stem}_{source_stat.st_size}_{source_stat.st_mtime_ns}.mp4"
+
+    return WEB_VIDEO_DIR / name
+
+
+def convert_video_for_browser(source_path):
+    if source_path.suffix.lower() in (".mp4", ".m4v"):
+        return source_path, None
+
+    ffmpeg = shutil.which("ffmpeg")
+
+    if ffmpeg is None:
+        return None, "ffmpeg не найден. Установи ffmpeg, чтобы dashboard конвертировал AVI в MP4."
+
+    WEB_VIDEO_DIR.mkdir(parents=True, exist_ok=True)
+    target_path = web_video_path(source_path)
+
+    if target_path.exists() and target_path.stat().st_size > 0:
+        return target_path, None
+
+    tmp_path = target_path.with_suffix(".tmp.mp4")
+
+    commands = [
+        [
+            ffmpeg,
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            str(source_path),
+            "-an",
+            "-vf",
+            "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "26",
+            "-movflags",
+            "+faststart",
+            str(tmp_path),
+        ],
+        [
+            ffmpeg,
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            str(source_path),
+            "-an",
+            "-vf",
+            "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+            "-c:v",
+            "mpeg4",
+            "-q:v",
+            "5",
+            "-movflags",
+            "+faststart",
+            str(tmp_path),
+        ],
+    ]
+
+    last_error = ""
+
+    for command in commands:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+
+        if result.returncode == 0 and tmp_path.exists() and tmp_path.stat().st_size > 0:
+            tmp_path.replace(target_path)
+            return target_path, None
+
+        last_error = result.stderr.strip() or result.stdout.strip()
+
+    if tmp_path.exists():
+        tmp_path.unlink()
+
+    return None, f"Не удалось подготовить MP4 для браузера: {last_error}"
 
 
 def get_health(events):
@@ -357,8 +454,8 @@ def render_events_table(events):
 
     return st.selectbox(
         "Открыть событие",
-        options=list(event_map.keys()),
-        format_func=lambda uid: event_map.get(uid, uid)
+        options=[""] + list(event_map.keys()),
+        format_func=lambda uid: "Не выбрано" if not uid else event_map.get(uid, uid)
     )
 
 
@@ -376,8 +473,23 @@ def render_event_detail(events, event_uid):
         exists, path = video_exists(event["video_path"])
 
         if exists:
-            st.video(str(path))
-            st.caption(str(path))
+            with st.spinner("Подготовка видео для браузера..."):
+                browser_path, error = convert_video_for_browser(path)
+
+            if browser_path is not None:
+                st.video(str(browser_path))
+                st.caption(f"MP4 для просмотра: {browser_path}")
+            else:
+                st.error(error)
+
+            with open(path, "rb") as source_file:
+                st.download_button(
+                    "Скачать оригинальный AVI",
+                    data=source_file,
+                    file_name=path.name,
+                    mime="video/x-msvideo",
+                    use_container_width=True,
+                )
         else:
             st.warning(f"Видео не найдено: {event['video_path']}")
 
@@ -458,9 +570,12 @@ def main():
     render_event_detail(events, selected_uid)
 
     if refresh:
-        time.sleep(interval)
-        st.cache_data.clear()
-        st.rerun()
+        if selected_uid:
+            st.sidebar.info("Автообновление на паузе, пока открыто событие.")
+        else:
+            time.sleep(interval)
+            st.cache_data.clear()
+            st.rerun()
 
 
 if __name__ == "__main__":
