@@ -482,14 +482,6 @@ def render_event_detail(events, event_uid):
             else:
                 st.error(error)
 
-            with open(path, "rb") as source_file:
-                st.download_button(
-                    "Скачать оригинальный AVI",
-                    data=source_file,
-                    file_name=path.name,
-                    mime="video/x-msvideo",
-                    use_container_width=True,
-                )
         else:
             st.warning(f"Видео не найдено: {event['video_path']}")
 
